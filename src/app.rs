@@ -19,8 +19,26 @@ pub struct LoadedImage {
     pub texture: TextureHandle,
     pub name: String,
     pub size: [usize; 2],
+    /// Size of the original encoded file in bytes.
+    pub file_size: usize,
     /// Raw RGBA8 pixels, kept in memory so edge detection can run without disk access.
     pub rgba: Vec<u8>,
+}
+
+/// Format a byte count into a human-readable string (e.g. "1.2 MB").
+pub fn format_file_size(bytes: usize) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit])
+    }
 }
 
 pub struct App {
@@ -74,6 +92,7 @@ impl App {
             texture,
             name: name.to_string(),
             size,
+            file_size: bytes.len(),
             rgba: raw,
         })
     }
@@ -103,21 +122,58 @@ impl App {
         }
     }
 
-    /// Open the browser file picker asynchronously and deliver the bytes over a channel.
+    /// Open the native browser file picker directly (no confirmation dialog) and
+    /// deliver the picked file's bytes over a channel.
     pub fn request_open(&self, side: Side) {
-        let tx = self.file_tx.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let file = rfd::AsyncFileDialog::new()
-                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
-                .pick_file()
-                .await;
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::closure::Closure;
 
-            if let Some(file) = file {
-                let name = file.file_name();
-                let bytes = file.read().await;
+        let tx = self.file_tx.clone();
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return,
+        };
+        let document = match window.document() {
+            Some(d) => d,
+            None => return,
+        };
+        let input: web_sys::HtmlInputElement = match document
+            .create_element("input")
+            .ok()
+            .and_then(|el| el.dyn_into().ok())
+        {
+            Some(i) => i,
+            None => return,
+        };
+        input.set_type("file");
+        input.set_accept(
+            "image/png,image/jpeg,image/webp,image/bmp,image/tiff,.png,.jpg,.jpeg,.webp,.bmp,.tiff",
+        );
+
+        let input_clone = input.clone();
+        let closure = Closure::<dyn FnMut()>::new(move || {
+            let Some(files) = input_clone.files() else {
+                return;
+            };
+            let Some(file) = files.get(0) else {
+                return;
+            };
+            let name = file.name();
+            let tx = tx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let Ok(buffer) = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await
+                else {
+                    return;
+                };
+                let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
                 let _ = tx.send(LoadedFile { side, name, bytes });
-            }
+            });
         });
+        input.set_onchange(Some(closure.as_ref().unchecked_ref()));
+        // The closure must outlive this function so the change event can fire.
+        closure.forget();
+
+        input.click();
     }
 
     /// Drain any files picked through the async dialog and apply them.
@@ -166,15 +222,21 @@ impl eframe::App for App {
 
                 if let Some(left) = &self.left {
                     ui.label(format!(
-                        "Left: {} ({}x{})",
-                        left.name, left.size[0], left.size[1]
+                        "Left: {} ({}) ({}x{})",
+                        left.name,
+                        format_file_size(left.file_size),
+                        left.size[0],
+                        left.size[1]
                     ));
                 }
                 if let Some(right) = &self.right {
                     ui.separator();
                     ui.label(format!(
-                        "Right: {} ({}x{})",
-                        right.name, right.size[0], right.size[1]
+                        "Right: {} ({}) ({}x{})",
+                        right.name,
+                        format_file_size(right.file_size),
+                        right.size[0],
+                        right.size[1]
                     ));
                 }
 
