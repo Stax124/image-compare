@@ -106,6 +106,32 @@ impl App {
                 .collect()
         });
 
+        if dropped_files.len() >= 2 {
+            // Multiple images dropped at once: overwrite both zones with the
+            // first two, ignoring any extras.
+            let mut changed = false;
+            for ((name, bytes), side) in dropped_files.iter().take(2).zip([Side::Left, Side::Right])
+            {
+                if let Some(loaded) = self.load_image(ctx, name, bytes) {
+                    match side {
+                        Side::Left => {
+                            self.left = Some(loaded);
+                            self.left_edge = None;
+                        }
+                        Side::Right => {
+                            self.right = Some(loaded);
+                            self.right_edge = None;
+                        }
+                    }
+                    changed = true;
+                }
+            }
+            if changed && self.edge_detect {
+                self.start_edge_compute(ctx);
+            }
+            return;
+        }
+
         for (name, bytes) in dropped_files {
             if let Some(loaded) = self.load_image(ctx, &name, &bytes) {
                 if self.left.is_none() {
