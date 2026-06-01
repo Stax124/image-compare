@@ -213,7 +213,10 @@ impl App {
             let a = start + sweep * (k as f32 / segments as f32);
             let p = center + Vec2::new(a.cos(), a.sin()) * radius;
             if let Some(prev) = prev {
-                painter.line_segment([prev, p], Stroke::new(3.0, Color32::from_rgb(100, 160, 255)));
+                painter.line_segment(
+                    [prev, p],
+                    Stroke::new(3.0, Color32::from_rgb(100, 160, 255)),
+                );
             }
             prev = Some(p);
         }
