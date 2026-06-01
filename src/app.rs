@@ -15,6 +15,16 @@ pub struct LoadedFile {
     pub bytes: Vec<u8>,
 }
 
+/// An image decoded asynchronously by the browser, delivered as raw RGBA8
+/// pixels ready to upload as a texture.
+pub struct DecodedImage {
+    pub side: Side,
+    pub name: String,
+    pub file_size: usize,
+    pub size: [usize; 2],
+    pub rgba: Vec<u8>,
+}
+
 pub struct LoadedImage {
     pub texture: TextureHandle,
     pub name: String,
@@ -69,11 +79,14 @@ pub struct App {
     pub right_edge_key: Option<u64>,
     pub file_tx: mpsc::Sender<LoadedFile>,
     pub file_rx: mpsc::Receiver<LoadedFile>,
+    pub decoded_tx: mpsc::Sender<DecodedImage>,
+    pub decoded_rx: mpsc::Receiver<DecodedImage>,
 }
 
 impl Default for App {
     fn default() -> Self {
         let (file_tx, file_rx) = mpsc::channel();
+        let (decoded_tx, decoded_rx) = mpsc::channel();
         Self {
             left: None,
             right: None,
@@ -90,29 +103,64 @@ impl Default for App {
             right_edge_key: None,
             file_tx,
             file_rx,
+            decoded_tx,
+            decoded_rx,
         }
     }
 }
 
 impl App {
-    pub fn load_image(&self, ctx: &egui::Context, name: &str, bytes: &[u8]) -> Option<LoadedImage> {
-        let img = image::load_from_memory(bytes).ok()?;
-        let rgba = img.to_rgba8();
-        let size = [rgba.width() as usize, rgba.height() as usize];
-        let raw = rgba.into_raw();
+    /// Build a `LoadedImage` (texture + cached pixels) from already-decoded
+    /// RGBA8 pixel data.
+    fn build_loaded_image(
+        &self,
+        ctx: &egui::Context,
+        name: &str,
+        file_size: usize,
+        size: [usize; 2],
+        raw: Vec<u8>,
+    ) -> LoadedImage {
         let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &raw);
-
         let texture = ctx.load_texture(name, color_image, TextureOptions::LINEAR);
         let hash = hash_rgba(&raw);
 
-        Some(LoadedImage {
+        LoadedImage {
             texture,
             name: name.to_string(),
             size,
-            file_size: bytes.len(),
+            file_size,
             rgba: raw,
             hash,
-        })
+        }
+    }
+
+    /// Assign a loaded image to one side, clearing that side's cached edges.
+    fn set_side(&mut self, side: Side, loaded: LoadedImage) {
+        match side {
+            Side::Left => {
+                self.left = Some(loaded);
+                self.left_edge = None;
+                self.left_edge_key = None;
+            }
+            Side::Right => {
+                self.right = Some(loaded);
+                self.right_edge = None;
+                self.right_edge_key = None;
+            }
+        }
+    }
+
+    /// Decode `bytes` and assign the result to `side`. Decoding is delegated to
+    /// the browser's native image decoder and arrives asynchronously via
+    /// `decoded_rx`.
+    fn load_and_set(&mut self, ctx: &egui::Context, side: Side, name: &str, bytes: &[u8]) {
+        decode_via_browser(
+            ctx.clone(),
+            self.decoded_tx.clone(),
+            side,
+            name.to_string(),
+            bytes.to_vec(),
+        );
     }
 
     pub fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -127,46 +175,20 @@ impl App {
         if dropped_files.len() >= 2 {
             // Multiple images dropped at once: overwrite both zones with the
             // first two, ignoring any extras.
-            let mut changed = false;
             for ((name, bytes), side) in dropped_files.iter().take(2).zip([Side::Left, Side::Right])
             {
-                if let Some(loaded) = self.load_image(ctx, name, bytes) {
-                    match side {
-                        Side::Left => {
-                            self.left = Some(loaded);
-                            self.left_edge = None;
-                            self.left_edge_key = None;
-                        }
-                        Side::Right => {
-                            self.right = Some(loaded);
-                            self.right_edge = None;
-                            self.right_edge_key = None;
-                        }
-                    }
-                    changed = true;
-                }
-            }
-            if changed && self.edge_detect {
-                self.start_edge_compute(ctx);
+                self.load_and_set(ctx, side, name, bytes);
             }
             return;
         }
 
         for (name, bytes) in dropped_files {
-            if let Some(loaded) = self.load_image(ctx, &name, &bytes) {
-                if self.left.is_none() {
-                    self.left = Some(loaded);
-                    self.left_edge = None;
-                    self.left_edge_key = None;
-                } else {
-                    self.right = Some(loaded);
-                    self.right_edge = None;
-                    self.right_edge_key = None;
-                }
-                if self.edge_detect {
-                    self.start_edge_compute(ctx);
-                }
-            }
+            let side = if self.left.is_none() {
+                Side::Left
+            } else {
+                Side::Right
+            };
+            self.load_and_set(ctx, side, &name, &bytes);
         }
     }
 
@@ -195,7 +217,7 @@ impl App {
         };
         input.set_type("file");
         input.set_accept(
-            "image/png,image/jpeg,image/webp,image/bmp,image/tiff,.png,.jpg,.jpeg,.webp,.bmp,.tiff",
+            "image/png,image/jpeg,image/webp,image/bmp,image/tiff,image/avif,.png,.jpg,.jpeg,.webp,.bmp,.tiff,.avif",
         );
 
         let input_clone = input.clone();
@@ -228,22 +250,19 @@ impl App {
     pub fn poll_picked_files(&mut self, ctx: &egui::Context) {
         let pending: Vec<LoadedFile> = self.file_rx.try_iter().collect();
         for file in pending {
-            if let Some(loaded) = self.load_image(ctx, &file.name, &file.bytes) {
-                match file.side {
-                    Side::Left => {
-                        self.left = Some(loaded);
-                        self.left_edge = None;
-                        self.left_edge_key = None;
-                    }
-                    Side::Right => {
-                        self.right = Some(loaded);
-                        self.right_edge = None;
-                        self.right_edge_key = None;
-                    }
-                }
-                if self.edge_detect {
-                    self.start_edge_compute(ctx);
-                }
+            self.load_and_set(ctx, file.side, &file.name, &file.bytes);
+        }
+    }
+
+    /// Drain any images decoded asynchronously by the browser (e.g. AVIF) and
+    /// apply them to their target side.
+    pub fn poll_decoded_images(&mut self, ctx: &egui::Context) {
+        let pending: Vec<DecodedImage> = self.decoded_rx.try_iter().collect();
+        for img in pending {
+            let loaded = self.build_loaded_image(ctx, &img.name, img.file_size, img.size, img.rgba);
+            self.set_side(img.side, loaded);
+            if self.edge_detect {
+                self.start_edge_compute(ctx);
             }
         }
     }
@@ -252,6 +271,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_picked_files(ctx);
+        self.poll_decoded_images(ctx);
         self.handle_dropped_files(ctx);
 
         ctx.input(|i| {
@@ -339,4 +359,82 @@ impl eframe::App for App {
             }
         });
     }
+}
+
+/// Decode an encoded image using the browser's native decoder, then deliver the
+/// raw RGBA8 pixels over `tx`. This handles every format the browser supports,
+/// including PNG, JPEG, WebP, and AVIF.
+///
+/// The bytes are wrapped in a `Blob`, loaded into an `HtmlImageElement`, drawn
+/// onto an offscreen canvas, and read back via `getImageData`.
+fn decode_via_browser(
+    ctx: egui::Context,
+    tx: mpsc::Sender<DecodedImage>,
+    side: Side,
+    name: String,
+    bytes: Vec<u8>,
+) {
+    use wasm_bindgen::JsCast;
+
+    wasm_bindgen_futures::spawn_local(async move {
+        let file_size = bytes.len();
+
+        // Wrap the encoded bytes in a Blob and hand the browser an object URL.
+        let array = js_sys::Uint8Array::from(bytes.as_slice());
+        let parts = js_sys::Array::new();
+        parts.push(&array);
+        let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence(&parts) else {
+            return;
+        };
+        let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+            return;
+        };
+
+        let url_for_revoke = url.clone();
+        let decoded = async move {
+            let img = web_sys::HtmlImageElement::new().ok()?;
+            img.set_src(&url);
+            wasm_bindgen_futures::JsFuture::from(img.decode())
+                .await
+                .ok()?;
+
+            let width = img.natural_width();
+            let height = img.natural_height();
+            if width == 0 || height == 0 {
+                return None;
+            }
+
+            // Draw onto an offscreen canvas and read the pixels back.
+            let document = web_sys::window()?.document()?;
+            let canvas: web_sys::HtmlCanvasElement =
+                document.create_element("canvas").ok()?.dyn_into().ok()?;
+            canvas.set_width(width);
+            canvas.set_height(height);
+            let context: web_sys::CanvasRenderingContext2d =
+                canvas.get_context("2d").ok()??.dyn_into().ok()?;
+            context
+                .draw_image_with_html_image_element(&img, 0.0, 0.0)
+                .ok()?;
+            let image_data = context
+                .get_image_data(0.0, 0.0, width as f64, height as f64)
+                .ok()?;
+
+            Some(DecodedImage {
+                side,
+                name,
+                file_size,
+                size: [width as usize, height as usize],
+                rgba: image_data.data().0,
+            })
+        }
+        .await;
+        let _ = web_sys::Url::revoke_object_url(&url_for_revoke);
+
+        if let Some(decoded) = decoded {
+            if tx.send(decoded).is_ok() {
+                // Wake the UI so the freshly decoded image is picked up.
+                ctx.request_repaint();
+            }
+        }
+    });
 }

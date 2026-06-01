@@ -6,11 +6,6 @@ edition = "2024"
 [dependencies]
 eframe = "0.31"
 egui = "0.31"
-image = { version = "0.25", default-features = false, features = [
-    "jpeg",
-    "png",
-    "webp",
-] }
 log = "0.4"
 
 # Web / WebAssembly target dependencies
@@ -22,7 +17,12 @@ web-sys = { version = "0.3", features = [
     "Window",
     "HtmlCanvasElement",
     "HtmlInputElement",
+    "HtmlImageElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
     "File",
     "FileList",
     "Blob",
+    "BlobPropertyBag",
+    "Url",
 ] }
