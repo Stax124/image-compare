@@ -194,6 +194,42 @@ impl App {
         }
     }
 
+    pub fn draw_loading(&mut self, ui: &mut egui::Ui) {
+        let available = ui.available_size();
+        let (response, painter) = ui.allocate_painter(available, Sense::hover());
+        let rect = response.rect;
+
+        painter.rect_filled(rect, 0.0, Color32::from_gray(30));
+
+        // Spinning arc indicator.
+        let center = rect.center() - Vec2::new(0.0, 24.0);
+        let radius = 22.0;
+        let t = ui.input(|i| i.time) as f32;
+        let start = t * 4.0;
+        let segments = 24;
+        let sweep = std::f32::consts::PI * 1.4;
+        let mut prev: Option<Pos2> = None;
+        for k in 0..=segments {
+            let a = start + sweep * (k as f32 / segments as f32);
+            let p = center + Vec2::new(a.cos(), a.sin()) * radius;
+            if let Some(prev) = prev {
+                painter.line_segment([prev, p], Stroke::new(3.0, Color32::from_rgb(100, 160, 255)));
+            }
+            prev = Some(p);
+        }
+
+        painter.text(
+            center + Vec2::new(0.0, radius + 28.0),
+            egui::Align2::CENTER_CENTER,
+            "Loading…",
+            egui::FontId::proportional(24.0),
+            Color32::from_gray(200),
+        );
+
+        // Keep animating while decoding completes.
+        ui.ctx().request_repaint();
+    }
+
     pub fn draw_drop_zone(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_size();
         let (response, painter) = ui.allocate_painter(available, Sense::hover());

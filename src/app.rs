@@ -25,6 +25,13 @@ pub struct DecodedImage {
     pub rgba: Vec<u8>,
 }
 
+/// Result of an asynchronous decode. Always delivered (even on failure) so the
+/// loading indicator can be cleared.
+pub enum DecodeOutcome {
+    Ok(DecodedImage),
+    Failed,
+}
+
 pub struct LoadedImage {
     pub texture: TextureHandle,
     pub name: String,
@@ -79,8 +86,18 @@ pub struct App {
     pub right_edge_key: Option<u64>,
     pub file_tx: mpsc::Sender<LoadedFile>,
     pub file_rx: mpsc::Receiver<LoadedFile>,
-    pub decoded_tx: mpsc::Sender<DecodedImage>,
-    pub decoded_rx: mpsc::Receiver<DecodedImage>,
+    pub decoded_tx: mpsc::Sender<DecodeOutcome>,
+    pub decoded_rx: mpsc::Receiver<DecodeOutcome>,
+    /// Whether a drag gesture was hovering files over the window last frame.
+    pub was_hovering: bool,
+    /// Number of files in the current/most recent drag gesture (known during
+    /// dragover, before the drop's bytes arrive).
+    pub drop_expected: usize,
+    /// How many files of the current drop gesture have been routed so far.
+    pub drop_index: usize,
+    /// Number of images currently being decoded asynchronously. While > 0 a
+    /// loading screen is shown instead of the drop zones.
+    pub pending_loads: usize,
 }
 
 impl Default for App {
@@ -105,6 +122,10 @@ impl Default for App {
             file_rx,
             decoded_tx,
             decoded_rx,
+            was_hovering: false,
+            drop_expected: 0,
+            drop_index: 0,
+            pending_loads: 0,
         }
     }
 }
@@ -154,6 +175,7 @@ impl App {
     /// the browser's native image decoder and arrives asynchronously via
     /// `decoded_rx`.
     fn load_and_set(&mut self, ctx: &egui::Context, side: Side, name: &str, bytes: &[u8]) {
+        self.pending_loads += 1;
         decode_via_browser(
             ctx.clone(),
             self.decoded_tx.clone(),
@@ -164,6 +186,22 @@ impl App {
     }
 
     pub fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        // On the web each dropped file is read by its own async future and
+        // pushed into `dropped_files` in a separate frame, so a multi-file drop
+        // never arrives all at once. Track the drag-hover state to learn how
+        // many files belong to the current drop and route them deterministically
+        // as their bytes trickle in.
+        let hovering_count = ctx.input(|i| i.raw.hovered_files.len());
+        if hovering_count > 0 {
+            if !self.was_hovering {
+                // A new drag gesture started: reset the per-drop routing index.
+                self.drop_index = 0;
+            }
+            // Number of files being dragged, available during dragover.
+            self.drop_expected = hovering_count;
+        }
+        self.was_hovering = hovering_count > 0;
+
         let dropped_files: Vec<(String, Vec<u8>)> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -172,22 +210,27 @@ impl App {
                 .collect()
         });
 
-        if dropped_files.len() >= 2 {
-            // Multiple images dropped at once: overwrite both zones with the
-            // first two, ignoring any extras.
-            for ((name, bytes), side) in dropped_files.iter().take(2).zip([Side::Left, Side::Right])
-            {
-                self.load_and_set(ctx, side, name, bytes);
-            }
-            return;
-        }
-
         for (name, bytes) in dropped_files {
-            let side = if self.left.is_none() {
-                Side::Left
+            let side = if self.drop_expected >= 2 {
+                // Multi-file drop: first file -> left, second -> right, ignore
+                // any extras.
+                match self.drop_index {
+                    0 => Side::Left,
+                    1 => Side::Right,
+                    _ => {
+                        self.drop_index += 1;
+                        continue;
+                    }
+                }
             } else {
-                Side::Right
+                // Single-file drop: fill the first empty side, else the right.
+                if self.left.is_none() {
+                    Side::Left
+                } else {
+                    Side::Right
+                }
             };
+            self.drop_index += 1;
             self.load_and_set(ctx, side, &name, &bytes);
         }
     }
@@ -257,8 +300,13 @@ impl App {
     /// Drain any images decoded asynchronously by the browser (e.g. AVIF) and
     /// apply them to their target side.
     pub fn poll_decoded_images(&mut self, ctx: &egui::Context) {
-        let pending: Vec<DecodedImage> = self.decoded_rx.try_iter().collect();
-        for img in pending {
+        let pending: Vec<DecodeOutcome> = self.decoded_rx.try_iter().collect();
+        for outcome in pending {
+            self.pending_loads = self.pending_loads.saturating_sub(1);
+            let img = match outcome {
+                DecodeOutcome::Ok(img) => img,
+                DecodeOutcome::Failed => continue,
+            };
             let loaded = self.build_loaded_image(ctx, &img.name, img.file_size, img.size, img.rgba);
             self.set_side(img.side, loaded);
             if self.edge_detect {
@@ -352,7 +400,9 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.left.is_some() && self.right.is_some() {
+            if self.pending_loads > 0 {
+                self.draw_loading(ui);
+            } else if self.left.is_some() && self.right.is_some() {
                 self.draw_comparison(ui);
             } else {
                 self.draw_drop_zone(ui);
@@ -369,7 +419,7 @@ impl eframe::App for App {
 /// onto an offscreen canvas, and read back via `getImageData`.
 fn decode_via_browser(
     ctx: egui::Context,
-    tx: mpsc::Sender<DecodedImage>,
+    tx: mpsc::Sender<DecodeOutcome>,
     side: Side,
     name: String,
     bytes: Vec<u8>,
@@ -384,9 +434,13 @@ fn decode_via_browser(
         let parts = js_sys::Array::new();
         parts.push(&array);
         let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence(&parts) else {
+            let _ = tx.send(DecodeOutcome::Failed);
+            ctx.request_repaint();
             return;
         };
         let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+            let _ = tx.send(DecodeOutcome::Failed);
+            ctx.request_repaint();
             return;
         };
 
@@ -430,11 +484,14 @@ fn decode_via_browser(
         .await;
         let _ = web_sys::Url::revoke_object_url(&url_for_revoke);
 
-        if let Some(decoded) = decoded {
-            if tx.send(decoded).is_ok() {
-                // Wake the UI so the freshly decoded image is picked up.
-                ctx.request_repaint();
-            }
+        let outcome = match decoded {
+            Some(decoded) => DecodeOutcome::Ok(decoded),
+            None => DecodeOutcome::Failed,
+        };
+        if tx.send(outcome).is_ok() {
+            // Wake the UI so the freshly decoded image (or cleared loading
+            // state) is picked up.
+            ctx.request_repaint();
         }
     });
 }
