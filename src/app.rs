@@ -23,6 +23,16 @@ pub struct LoadedImage {
     pub file_size: usize,
     /// Raw RGBA8 pixels, kept in memory so edge detection can run without disk access.
     pub rgba: Vec<u8>,
+    /// Hash of the raw pixels, used to cache edge detection results.
+    pub hash: u64,
+}
+
+/// Compute a fast content hash of raw pixel data.
+fn hash_rgba(rgba: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    rgba.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Format a byte count into a human-readable string (e.g. "1.2 MB").
@@ -53,6 +63,10 @@ pub struct App {
     pub edge_detect: bool,
     pub left_edge: Option<TextureHandle>,
     pub right_edge: Option<TextureHandle>,
+    /// Hash of the input the cached `left_edge` was computed from.
+    pub left_edge_key: Option<u64>,
+    /// Hash of the input the cached `right_edge` was computed from.
+    pub right_edge_key: Option<u64>,
     pub file_tx: mpsc::Sender<LoadedFile>,
     pub file_rx: mpsc::Receiver<LoadedFile>,
 }
@@ -72,6 +86,8 @@ impl Default for App {
             edge_detect: false,
             left_edge: None,
             right_edge: None,
+            left_edge_key: None,
+            right_edge_key: None,
             file_tx,
             file_rx,
         }
@@ -87,6 +103,7 @@ impl App {
         let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &raw);
 
         let texture = ctx.load_texture(name, color_image, TextureOptions::LINEAR);
+        let hash = hash_rgba(&raw);
 
         Some(LoadedImage {
             texture,
@@ -94,6 +111,7 @@ impl App {
             size,
             file_size: bytes.len(),
             rgba: raw,
+            hash,
         })
     }
 
@@ -117,10 +135,12 @@ impl App {
                         Side::Left => {
                             self.left = Some(loaded);
                             self.left_edge = None;
+                            self.left_edge_key = None;
                         }
                         Side::Right => {
                             self.right = Some(loaded);
                             self.right_edge = None;
+                            self.right_edge_key = None;
                         }
                     }
                     changed = true;
@@ -137,9 +157,11 @@ impl App {
                 if self.left.is_none() {
                     self.left = Some(loaded);
                     self.left_edge = None;
+                    self.left_edge_key = None;
                 } else {
                     self.right = Some(loaded);
                     self.right_edge = None;
+                    self.right_edge_key = None;
                 }
                 if self.edge_detect {
                     self.start_edge_compute(ctx);
@@ -211,10 +233,12 @@ impl App {
                     Side::Left => {
                         self.left = Some(loaded);
                         self.left_edge = None;
+                        self.left_edge_key = None;
                     }
                     Side::Right => {
                         self.right = Some(loaded);
                         self.right_edge = None;
+                        self.right_edge_key = None;
                     }
                 }
                 if self.edge_detect {
@@ -240,6 +264,13 @@ impl eframe::App for App {
                 self.pan_offset = Vec2::ZERO;
             }
         });
+
+        if ctx.input(|i| i.key_pressed(egui::Key::E)) {
+            self.edge_detect = !self.edge_detect;
+            if self.edge_detect {
+                self.start_edge_compute(ctx);
+            }
+        }
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -269,13 +300,8 @@ impl eframe::App for App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(format!("Zoom: {:.0}%", self.zoom * 100.0));
                     let toggle = ui.toggle_value(&mut self.edge_detect, "Edge Detect");
-                    if toggle.changed() {
-                        if self.edge_detect {
-                            self.start_edge_compute(ctx);
-                        } else {
-                            self.left_edge = None;
-                            self.right_edge = None;
-                        }
+                    if toggle.changed() && self.edge_detect {
+                        self.start_edge_compute(ctx);
                     }
                     if ui.button("Reset").clicked() {
                         self.zoom = 1.0;
@@ -287,6 +313,8 @@ impl eframe::App for App {
                             self.right = None;
                             self.left_edge = None;
                             self.right_edge = None;
+                            self.left_edge_key = None;
+                            self.right_edge_key = None;
                             self.edge_detect = false;
                             self.zoom = 1.0;
                             self.pan_offset = Vec2::ZERO;
