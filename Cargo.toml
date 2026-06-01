@@ -11,7 +11,14 @@ image = { version = "0.25", default-features = false, features = [
     "png",
     "webp",
 ] }
-rayon = "1"
 rfd = "0.15"
-env_logger = "0.11"
 log = "0.4"
+
+# Web / WebAssembly target dependencies
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Window",
+    "HtmlCanvasElement",
+] }

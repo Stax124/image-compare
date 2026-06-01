@@ -1,15 +1,26 @@
 use eframe::egui;
 use egui::{TextureHandle, TextureOptions, Vec2};
-use std::path::PathBuf;
 use std::sync::mpsc;
 
-use crate::edge::EdgeResult;
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+/// A file picked or dropped on the web, delivered as in-memory bytes.
+pub struct LoadedFile {
+    pub side: Side,
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
 
 pub struct LoadedImage {
     pub texture: TextureHandle,
     pub name: String,
     pub size: [usize; 2],
-    pub path: PathBuf,
+    /// Raw RGBA8 pixels, kept in memory so edge detection can run without disk access.
+    pub rgba: Vec<u8>,
 }
 
 pub struct App {
@@ -22,14 +33,15 @@ pub struct App {
     pub panning: bool,
     pub last_pan_pos: Option<egui::Pos2>,
     pub edge_detect: bool,
-    pub edge_computing: bool,
     pub left_edge: Option<TextureHandle>,
     pub right_edge: Option<TextureHandle>,
-    pub edge_rx: Option<mpsc::Receiver<EdgeResult>>,
+    pub file_tx: mpsc::Sender<LoadedFile>,
+    pub file_rx: mpsc::Receiver<LoadedFile>,
 }
 
 impl Default for App {
     fn default() -> Self {
+        let (file_tx, file_rx) = mpsc::channel();
         Self {
             left: None,
             right: None,
@@ -40,53 +52,46 @@ impl Default for App {
             panning: false,
             last_pan_pos: None,
             edge_detect: false,
-            edge_computing: false,
             left_edge: None,
             right_edge: None,
-            edge_rx: None,
+            file_tx,
+            file_rx,
         }
     }
 }
 
 impl App {
-    pub fn load_image(&self, ctx: &egui::Context, path: &PathBuf) -> Option<LoadedImage> {
-        let img = image::open(path).ok()?;
+    pub fn load_image(&self, ctx: &egui::Context, name: &str, bytes: &[u8]) -> Option<LoadedImage> {
+        let img = image::load_from_memory(bytes).ok()?;
         let rgba = img.to_rgba8();
         let size = [rgba.width() as usize, rgba.height() as usize];
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+        let raw = rgba.into_raw();
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &raw);
 
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let texture = ctx.load_texture(&name, color_image, TextureOptions::LINEAR);
+        let texture = ctx.load_texture(name, color_image, TextureOptions::LINEAR);
 
         Some(LoadedImage {
             texture,
-            name,
+            name: name.to_string(),
             size,
-            path: path.clone(),
+            rgba: raw,
         })
     }
 
     pub fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped_files: Vec<PathBuf> = ctx.input(|i| {
+        let dropped_files: Vec<(String, Vec<u8>)> = ctx.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .filter_map(|f| f.bytes.as_ref().map(|b| (f.name.clone(), b.to_vec())))
                 .collect()
         });
 
-        for path in dropped_files {
-            if let Some(loaded) = self.load_image(ctx, &path) {
+        for (name, bytes) in dropped_files {
+            if let Some(loaded) = self.load_image(ctx, &name, &bytes) {
                 if self.left.is_none() {
                     self.left = Some(loaded);
                     self.left_edge = None;
-                } else if self.right.is_none() {
-                    self.right = Some(loaded);
-                    self.right_edge = None;
                 } else {
                     self.right = Some(loaded);
                     self.right_edge = None;
@@ -98,16 +103,49 @@ impl App {
         }
     }
 
-    pub fn pick_image_file() -> Option<PathBuf> {
-        rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
-            .pick_file()
+    /// Open the browser file picker asynchronously and deliver the bytes over a channel.
+    pub fn request_open(&self, side: Side) {
+        let tx = self.file_tx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let file = rfd::AsyncFileDialog::new()
+                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
+                .pick_file()
+                .await;
+
+            if let Some(file) = file {
+                let name = file.file_name();
+                let bytes = file.read().await;
+                let _ = tx.send(LoadedFile { side, name, bytes });
+            }
+        });
+    }
+
+    /// Drain any files picked through the async dialog and apply them.
+    pub fn poll_picked_files(&mut self, ctx: &egui::Context) {
+        let pending: Vec<LoadedFile> = self.file_rx.try_iter().collect();
+        for file in pending {
+            if let Some(loaded) = self.load_image(ctx, &file.name, &file.bytes) {
+                match file.side {
+                    Side::Left => {
+                        self.left = Some(loaded);
+                        self.left_edge = None;
+                    }
+                    Side::Right => {
+                        self.right = Some(loaded);
+                        self.right_edge = None;
+                    }
+                }
+                if self.edge_detect {
+                    self.start_edge_compute(ctx);
+                }
+            }
+        }
     }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_edge_results(ctx);
+        self.poll_picked_files(ctx);
         self.handle_dropped_files(ctx);
 
         ctx.input(|i| {
@@ -142,20 +180,13 @@ impl eframe::App for App {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(format!("Zoom: {:.0}%", self.zoom * 100.0));
-                    let edge_label = if self.edge_computing {
-                        "Edge Detect ⏳"
-                    } else {
-                        "Edge Detect"
-                    };
-                    let toggle = ui.toggle_value(&mut self.edge_detect, edge_label);
+                    let toggle = ui.toggle_value(&mut self.edge_detect, "Edge Detect");
                     if toggle.changed() {
                         if self.edge_detect {
                             self.start_edge_compute(ctx);
                         } else {
                             self.left_edge = None;
                             self.right_edge = None;
-                            self.edge_computing = false;
-                            self.edge_rx = None;
                         }
                     }
                     if ui.button("Reset").clicked() {
@@ -175,18 +206,10 @@ impl eframe::App for App {
                         }
                     }
                     if ui.button("Open Right").clicked() {
-                        if let Some(path) = App::pick_image_file() {
-                            if let Some(loaded) = self.load_image(ui.ctx(), &path) {
-                                self.right = Some(loaded);
-                            }
-                        }
+                        self.request_open(Side::Right);
                     }
                     if ui.button("Open Left").clicked() {
-                        if let Some(path) = App::pick_image_file() {
-                            if let Some(loaded) = self.load_image(ui.ctx(), &path) {
-                                self.left = Some(loaded);
-                            }
-                        }
+                        self.request_open(Side::Left);
                     }
                 });
             });

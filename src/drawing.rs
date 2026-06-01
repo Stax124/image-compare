@@ -238,15 +238,12 @@ impl App {
 
         // Click to open file picker
         if response.interact(Sense::click()).clicked() {
-            if let Some(path) = Self::pick_image_file() {
-                if let Some(loaded) = self.load_image(ui.ctx(), &path) {
-                    if self.left.is_none() {
-                        self.left = Some(loaded);
-                    } else {
-                        self.right = Some(loaded);
-                    }
-                }
-            }
+            let side = if self.left.is_none() {
+                crate::app::Side::Left
+            } else {
+                crate::app::Side::Right
+            };
+            self.request_open(side);
         }
     }
 }
