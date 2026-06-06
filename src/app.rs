@@ -68,6 +68,17 @@ pub fn format_file_size(bytes: usize) -> String {
     }
 }
 
+/// Truncate a file name to at most `max` characters, appending an ellipsis when
+/// it was shortened. Keeps compact image info from overflowing on mobile.
+fn truncate_name(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        name.to_string()
+    } else {
+        let keep: String = name.chars().take(max.saturating_sub(1)).collect();
+        format!("{keep}…")
+    }
+}
+
 pub struct App {
     pub left: Option<LoadedImage>,
     pub right: Option<LoadedImage>,
@@ -316,6 +327,135 @@ impl App {
     }
 }
 
+impl App {
+    /// Clear both images, cached edges, and reset the view.
+    fn clear_all(&mut self) {
+        self.left = None;
+        self.right = None;
+        self.left_edge = None;
+        self.right_edge = None;
+        self.left_edge_key = None;
+        self.right_edge_key = None;
+        self.edge_detect = false;
+        self.zoom = 1.0;
+        self.pan_offset = Vec2::ZERO;
+        self.separator = 0.5;
+    }
+
+    /// Wide-screen header: a single horizontal row with info on the left and
+    /// controls aligned to the right.
+    fn draw_header_wide(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            ui.heading("Image Compare");
+            ui.separator();
+
+            if let Some(left) = &self.left {
+                ui.label(format!(
+                    "Left: {} ({}) ({}x{})",
+                    left.name,
+                    format_file_size(left.file_size),
+                    left.size[0],
+                    left.size[1]
+                ));
+            }
+            if let Some(right) = &self.right {
+                ui.separator();
+                ui.label(format!(
+                    "Right: {} ({}) ({}x{})",
+                    right.name,
+                    format_file_size(right.file_size),
+                    right.size[0],
+                    right.size[1]
+                ));
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(format!("Zoom: {:.0}%", self.zoom * 100.0));
+                let toggle = ui.toggle_value(&mut self.edge_detect, "Edge Detect");
+                if toggle.changed() && self.edge_detect {
+                    self.start_edge_compute(ctx);
+                }
+                if ui.button("Reset").clicked() {
+                    self.zoom = 1.0;
+                    self.pan_offset = Vec2::ZERO;
+                }
+                if self.left.is_some() || self.right.is_some() {
+                    if ui.button("Clear").clicked() {
+                        self.clear_all();
+                    }
+                }
+                if ui.button("Open Right").clicked() {
+                    self.request_open(Side::Right);
+                }
+                if ui.button("Open Left").clicked() {
+                    self.request_open(Side::Left);
+                }
+            });
+        });
+    }
+
+    /// Narrow/mobile header: title and zoom on one row, touch-friendly controls
+    /// that wrap onto multiple rows, and truncated image info below.
+    fn draw_header_narrow(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        // Larger touch targets and spacing for finger input.
+        let spacing = &mut ui.style_mut().spacing;
+        spacing.button_padding = egui::vec2(10.0, 8.0);
+        spacing.item_spacing = egui::vec2(8.0, 8.0);
+        spacing.interact_size.y = spacing.interact_size.y.max(34.0);
+
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.heading("Image Compare");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(format!("{:.0}%", self.zoom * 100.0));
+            });
+        });
+
+        // Controls wrap to additional rows when they don't fit.
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Open Left").clicked() {
+                self.request_open(Side::Left);
+            }
+            if ui.button("Open Right").clicked() {
+                self.request_open(Side::Right);
+            }
+            let toggle = ui.toggle_value(&mut self.edge_detect, "Edges");
+            if toggle.changed() && self.edge_detect {
+                self.start_edge_compute(ctx);
+            }
+            if ui.button("Reset").clicked() {
+                self.zoom = 1.0;
+                self.pan_offset = Vec2::ZERO;
+            }
+            if self.left.is_some() || self.right.is_some() {
+                if ui.button("Clear").clicked() {
+                    self.clear_all();
+                }
+            }
+        });
+
+        if let Some(left) = &self.left {
+            ui.label(format!(
+                "L: {} · {} · {}×{}",
+                truncate_name(&left.name, 18),
+                format_file_size(left.file_size),
+                left.size[0],
+                left.size[1]
+            ));
+        }
+        if let Some(right) = &self.right {
+            ui.label(format!(
+                "R: {} · {} · {}×{}",
+                truncate_name(&right.name, 18),
+                format_file_size(right.file_size),
+                right.size[0],
+                right.size[1]
+            ));
+        }
+        ui.add_space(2.0);
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_picked_files(ctx);
@@ -341,62 +481,14 @@ impl eframe::App for App {
         }
 
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Image Compare");
-                ui.separator();
-
-                if let Some(left) = &self.left {
-                    ui.label(format!(
-                        "Left: {} ({}) ({}x{})",
-                        left.name,
-                        format_file_size(left.file_size),
-                        left.size[0],
-                        left.size[1]
-                    ));
-                }
-                if let Some(right) = &self.right {
-                    ui.separator();
-                    ui.label(format!(
-                        "Right: {} ({}) ({}x{})",
-                        right.name,
-                        format_file_size(right.file_size),
-                        right.size[0],
-                        right.size[1]
-                    ));
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!("Zoom: {:.0}%", self.zoom * 100.0));
-                    let toggle = ui.toggle_value(&mut self.edge_detect, "Edge Detect");
-                    if toggle.changed() && self.edge_detect {
-                        self.start_edge_compute(ctx);
-                    }
-                    if ui.button("Reset").clicked() {
-                        self.zoom = 1.0;
-                        self.pan_offset = Vec2::ZERO;
-                    }
-                    if self.left.is_some() || self.right.is_some() {
-                        if ui.button("Clear").clicked() {
-                            self.left = None;
-                            self.right = None;
-                            self.left_edge = None;
-                            self.right_edge = None;
-                            self.left_edge_key = None;
-                            self.right_edge_key = None;
-                            self.edge_detect = false;
-                            self.zoom = 1.0;
-                            self.pan_offset = Vec2::ZERO;
-                            self.separator = 0.5;
-                        }
-                    }
-                    if ui.button("Open Right").clicked() {
-                        self.request_open(Side::Right);
-                    }
-                    if ui.button("Open Left").clicked() {
-                        self.request_open(Side::Left);
-                    }
-                });
-            });
+            // Switch to a compact, stacked layout on narrow (mobile) screens so
+            // the controls and image info don't overflow off-screen.
+            let narrow = ui.available_width() < 640.0;
+            if narrow {
+                self.draw_header_narrow(ui, ctx);
+            } else {
+                self.draw_header_wide(ui, ctx);
+            }
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {

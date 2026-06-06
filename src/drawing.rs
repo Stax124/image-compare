@@ -262,17 +262,30 @@ impl App {
         );
 
         let text = if self.left.is_none() {
-            "First image (Drag and drop or click to browse)"
+            "First image"
         } else {
-            "Second image (Drag and drop or click to browse)"
+            "Second image"
         };
 
+        let narrow = rect.width() < 640.0;
+        let title_size = if narrow { 22.0 } else { 28.0 };
+        let hint_size = if narrow { 14.0 } else { 18.0 };
+        let gap = title_size * 0.5 + hint_size * 0.5 + 6.0;
+
         painter.text(
-            rect.center(),
+            rect.center() - Vec2::new(0.0, gap),
             egui::Align2::CENTER_CENTER,
             text,
-            egui::FontId::proportional(20.0),
-            Color32::from_gray(180),
+            egui::FontId::proportional(title_size),
+            Color32::from_gray(200),
+        );
+
+        painter.text(
+            rect.center() + Vec2::new(0.0, gap),
+            egui::Align2::CENTER_CENTER,
+            "Drag & drop or tap to browse",
+            egui::FontId::proportional(hint_size),
+            Color32::from_gray(150),
         );
 
         // Click to open file picker
