@@ -295,7 +295,7 @@ impl App {
             } else {
                 crate::app::Side::Right
             };
-            self.request_open(side);
+            self.request_open(ui.ctx(), side);
         }
     }
 }

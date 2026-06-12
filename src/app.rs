@@ -270,11 +270,12 @@ impl App {
 
     /// Open the native browser file picker directly (no confirmation dialog) and
     /// deliver the picked file's bytes over a channel.
-    pub fn request_open(&self, side: Side) {
+    pub fn request_open(&self, ctx: &egui::Context, side: Side) {
         use wasm_bindgen::JsCast;
         use wasm_bindgen::closure::Closure;
 
         let tx = self.file_tx.clone();
+        let ctx = ctx.clone();
         let window = match web_sys::window() {
             Some(w) => w,
             None => return,
@@ -306,13 +307,18 @@ impl App {
             };
             let name = file.name();
             let tx = tx.clone();
+            let ctx = ctx.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let Ok(buffer) = wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await
                 else {
                     return;
                 };
                 let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-                let _ = tx.send(LoadedFile { side, name, bytes });
+                if tx.send(LoadedFile { side, name, bytes }).is_ok() {
+                    // Wake the UI so the picked file is polled and decoded even
+                    // when no other input is driving frames (e.g. on mobile).
+                    ctx.request_repaint();
+                }
             });
         });
         input.set_onchange(Some(closure.as_ref().unchecked_ref()));
@@ -407,10 +413,10 @@ impl App {
                     }
                 }
                 if ui.button("Open Right").clicked() {
-                    self.request_open(Side::Right);
+                    self.request_open(ctx, Side::Right);
                 }
                 if ui.button("Open Left").clicked() {
-                    self.request_open(Side::Left);
+                    self.request_open(ctx, Side::Left);
                 }
             });
         });
@@ -436,10 +442,10 @@ impl App {
         // Controls wrap to additional rows when they don't fit.
         ui.horizontal_wrapped(|ui| {
             if ui.button("Open Left").clicked() {
-                self.request_open(Side::Left);
+                self.request_open(ctx, Side::Left);
             }
             if ui.button("Open Right").clicked() {
-                self.request_open(Side::Right);
+                self.request_open(ctx, Side::Right);
             }
             let toggle = ui.toggle_value(&mut self.edge_detect, "Edges");
             if toggle.changed() && self.edge_detect {
