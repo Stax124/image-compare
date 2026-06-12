@@ -17,12 +17,23 @@ web-sys = { version = "0.3", features = [
     "Window",
     "HtmlCanvasElement",
     "HtmlInputElement",
-    "HtmlImageElement",
+    "ImageBitmap",
     "CanvasRenderingContext2d",
     "ImageData",
     "File",
     "FileList",
     "Blob",
     "BlobPropertyBag",
-    "Url",
+    "Performance",
 ] }
+
+# Optimize dependencies (egui, etc.) even in debug/`trunk serve` builds. Without
+# this, per-pixel loops such as `ColorImage::from_rgba_unmultiplied` run
+# unoptimized and are 10-50x slower, which dominates image load time.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Light optimization for our own crate keeps debug compiles fast while speeding
+# up hot loops (edge detection, pixel processing).
+[profile.dev]
+opt-level = 1

@@ -40,16 +40,25 @@ pub struct LoadedImage {
     pub file_size: usize,
     /// Raw RGBA8 pixels, kept in memory so edge detection can run without disk access.
     pub rgba: Vec<u8>,
-    /// Hash of the raw pixels, used to cache edge detection results.
-    pub hash: u64,
+    /// Unique id assigned at load time, used as a cache key for edge detection.
+    pub id: u64,
 }
 
-/// Compute a fast content hash of raw pixel data.
-fn hash_rgba(rgba: &[u8]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    rgba.hash(&mut hasher);
-    hasher.finish()
+/// Returns a process-unique, monotonically increasing id for each loaded image.
+/// Used as a cheap cache key for edge detection instead of hashing every pixel.
+fn next_image_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Current high-resolution timestamp in milliseconds, used for timing logs.
+/// Falls back to 0.0 if the Performance API is unavailable.
+fn now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now())
+        .unwrap_or(0.0)
 }
 
 /// Format a byte count into a human-readable string (e.g. "1.2 MB").
@@ -152,9 +161,22 @@ impl App {
         size: [usize; 2],
         raw: Vec<u8>,
     ) -> LoadedImage {
+        let t_start = now_ms();
         let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &raw);
+        let t_color = now_ms();
         let texture = ctx.load_texture(name, color_image, TextureOptions::LINEAR);
-        let hash = hash_rgba(&raw);
+        let t_texture = now_ms();
+        let id = next_image_id();
+
+        log::info!(
+            "[timing] build_loaded_image '{}' ({}x{}): ColorImage {:.1}ms, upload texture {:.1}ms, total {:.1}ms",
+            name,
+            size[0],
+            size[1],
+            t_color - t_start,
+            t_texture - t_color,
+            t_texture - t_start,
+        );
 
         LoadedImage {
             texture,
@@ -162,7 +184,7 @@ impl App {
             size,
             file_size,
             rgba: raw,
-            hash,
+            id,
         }
     }
 
@@ -507,8 +529,10 @@ impl eframe::App for App {
 /// raw RGBA8 pixels over `tx`. This handles every format the browser supports,
 /// including PNG, JPEG, WebP, and AVIF.
 ///
-/// The bytes are wrapped in a `Blob`, loaded into an `HtmlImageElement`, drawn
-/// onto an offscreen canvas, and read back via `getImageData`.
+/// The bytes are wrapped in a `Blob` and handed to `createImageBitmap`, which
+/// decodes the image (potentially off the main thread). The resulting
+/// `ImageBitmap` is drawn onto an offscreen canvas and read back via
+/// `getImageData`.
 fn decode_via_browser(
     ctx: egui::Context,
     tx: mpsc::Sender<DecodeOutcome>,
@@ -520,8 +544,9 @@ fn decode_via_browser(
 
     wasm_bindgen_futures::spawn_local(async move {
         let file_size = bytes.len();
+        let t_start = now_ms();
 
-        // Wrap the encoded bytes in a Blob and hand the browser an object URL.
+        // Wrap the encoded bytes in a Blob.
         let array = js_sys::Uint8Array::from(bytes.as_slice());
         let parts = js_sys::Array::new();
         parts.push(&array);
@@ -530,51 +555,67 @@ fn decode_via_browser(
             ctx.request_repaint();
             return;
         };
-        let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
-            let _ = tx.send(DecodeOutcome::Failed);
-            ctx.request_repaint();
-            return;
-        };
 
-        let url_for_revoke = url.clone();
+        let log_name = name.clone();
         let decoded = async move {
-            let img = web_sys::HtmlImageElement::new().ok()?;
-            img.set_src(&url);
-            wasm_bindgen_futures::JsFuture::from(img.decode())
+            // `createImageBitmap` performs the decode, possibly off the main
+            // thread, which is faster than going through an `HtmlImageElement`.
+            let window = web_sys::window()?;
+            let promise = window.create_image_bitmap_with_blob(&blob).ok()?;
+            let bitmap: web_sys::ImageBitmap = wasm_bindgen_futures::JsFuture::from(promise)
                 .await
+                .ok()?
+                .dyn_into()
                 .ok()?;
+            let t_decode = now_ms();
 
-            let width = img.natural_width();
-            let height = img.natural_height();
+            let width = bitmap.width();
+            let height = bitmap.height();
             if width == 0 || height == 0 {
+                bitmap.close();
                 return None;
             }
 
             // Draw onto an offscreen canvas and read the pixels back.
-            let document = web_sys::window()?.document()?;
+            let document = window.document()?;
             let canvas: web_sys::HtmlCanvasElement =
                 document.create_element("canvas").ok()?.dyn_into().ok()?;
             canvas.set_width(width);
             canvas.set_height(height);
             let context: web_sys::CanvasRenderingContext2d =
                 canvas.get_context("2d").ok()??.dyn_into().ok()?;
-            context
-                .draw_image_with_html_image_element(&img, 0.0, 0.0)
-                .ok()?;
+            let draw_result = context.draw_image_with_image_bitmap(&bitmap, 0.0, 0.0);
+            // Release the bitmap's resources as soon as it has been drawn.
+            bitmap.close();
+            draw_result.ok()?;
+            let t_draw = now_ms();
             let image_data = context
                 .get_image_data(0.0, 0.0, width as f64, height as f64)
                 .ok()?;
+            let rgba = image_data.data().0;
+            let t_readback = now_ms();
+
+            log::info!(
+                "[timing] decode '{}' ({}x{}, {} bytes): createImageBitmap {:.1}ms, draw_image {:.1}ms, get_image_data {:.1}ms, decode total {:.1}ms",
+                log_name,
+                width,
+                height,
+                file_size,
+                t_decode - t_start,
+                t_draw - t_decode,
+                t_readback - t_draw,
+                t_readback - t_start,
+            );
 
             Some(DecodedImage {
                 side,
                 name,
                 file_size,
                 size: [width as usize, height as usize],
-                rgba: image_data.data().0,
+                rgba,
             })
         }
         .await;
-        let _ = web_sys::Url::revoke_object_url(&url_for_revoke);
 
         let outcome = match decoded {
             Some(decoded) => DecodeOutcome::Ok(decoded),
