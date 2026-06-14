@@ -1,6 +1,8 @@
 mod app;
+mod decode;
 mod drawing;
 mod edge;
+mod types;
 
 use app::App;
 use wasm_bindgen::JsCast;

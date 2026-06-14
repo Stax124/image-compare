@@ -43,33 +43,33 @@ impl App {
     pub fn start_edge_compute(&mut self, ctx: &egui::Context) {
         if let Some(left) = &self.left {
             // Skip recomputation if the cached result matches the current input.
-            if self.left_edge.is_none() || self.left_edge_key != Some(left.id) {
+            if self.edges.left.is_none() || self.edges.left_key != Some(left.id) {
                 let edge_image = sobel_edge_detect(&left.rgba, left.size[0], left.size[1]);
-                self.left_edge = Some(ctx.load_texture(
+                self.edges.left = Some(ctx.load_texture(
                     format!("{}_edge", left.name),
                     edge_image,
                     TextureOptions::LINEAR,
                 ));
-                self.left_edge_key = Some(left.id);
+                self.edges.left_key = Some(left.id);
             }
         } else {
-            self.left_edge = None;
-            self.left_edge_key = None;
+            self.edges.left = None;
+            self.edges.left_key = None;
         }
 
         if let Some(right) = &self.right {
-            if self.right_edge.is_none() || self.right_edge_key != Some(right.id) {
+            if self.edges.right.is_none() || self.edges.right_key != Some(right.id) {
                 let edge_image = sobel_edge_detect(&right.rgba, right.size[0], right.size[1]);
-                self.right_edge = Some(ctx.load_texture(
+                self.edges.right = Some(ctx.load_texture(
                     format!("{}_edge", right.name),
                     edge_image,
                     TextureOptions::LINEAR,
                 ));
-                self.right_edge_key = Some(right.id);
+                self.edges.right_key = Some(right.id);
             }
         } else {
-            self.right_edge = None;
-            self.right_edge_key = None;
+            self.edges.right = None;
+            self.edges.right_key = None;
         }
     }
 }
