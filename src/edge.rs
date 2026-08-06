@@ -2,6 +2,7 @@ use eframe::egui;
 use egui::{ColorImage, TextureOptions};
 
 use crate::app::App;
+use crate::types::Side;
 
 /// Sobel edge detection over raw RGBA8 pixels, run synchronously.
 pub fn sobel_edge_detect(rgba: &[u8], w: usize, h: usize) -> ColorImage {
@@ -40,36 +41,27 @@ pub fn sobel_edge_detect(rgba: &[u8], w: usize, h: usize) -> ColorImage {
 }
 
 impl App {
-    pub fn start_edge_compute(&mut self, ctx: &egui::Context) {
-        if let Some(left) = &self.left {
-            // Skip recomputation if the cached result matches the current input.
-            if self.edges.left.is_none() || self.edges.left_key != Some(left.id) {
-                let edge_image = sobel_edge_detect(&left.rgba, left.size[0], left.size[1]);
-                self.edges.left = Some(ctx.load_texture(
-                    format!("{}_edge", left.name),
-                    edge_image,
-                    TextureOptions::LINEAR,
-                ));
-                self.edges.left_key = Some(left.id);
+    pub(crate) fn start_edge_compute(&mut self, ctx: &egui::Context) {
+        for side in Side::ALL {
+            let Some(img) = self.image(side) else {
+                self.edges.clear_side(side);
+                continue;
+            };
+            if !self.edges.cache(side).needs_recompute(img.id) {
+                continue;
             }
-        } else {
-            self.edges.left = None;
-            self.edges.left_key = None;
-        }
 
-        if let Some(right) = &self.right {
-            if self.edges.right.is_none() || self.edges.right_key != Some(right.id) {
-                let edge_image = sobel_edge_detect(&right.rgba, right.size[0], right.size[1]);
-                self.edges.right = Some(ctx.load_texture(
-                    format!("{}_edge", right.name),
-                    edge_image,
-                    TextureOptions::LINEAR,
-                ));
-                self.edges.right_key = Some(right.id);
-            }
-        } else {
-            self.edges.right = None;
-            self.edges.right_key = None;
+            // Copy what we need so we can mutably borrow `edges` after.
+            let id = img.id;
+            let name = img.name.clone();
+            let size = img.size;
+            let edge_image = sobel_edge_detect(&img.rgba, size[0], size[1]);
+            let texture =
+                ctx.load_texture(format!("{name}_edge"), edge_image, TextureOptions::LINEAR);
+
+            let cache = self.edges.cache_mut(side);
+            cache.texture = Some(texture);
+            cache.key = Some(id);
         }
     }
 }

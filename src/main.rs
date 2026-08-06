@@ -2,6 +2,8 @@ mod app;
 mod decode;
 mod drawing;
 mod edge;
+mod load;
+mod state;
 mod types;
 
 use app::App;

@@ -15,15 +15,20 @@ images side-by-side with a draggable separator, pan/zoom, and Sobel edge detecti
 ## Architecture
 
 Single-page app. The entry point [src/main.rs](src/main.rs) boots `eframe::WebRunner` on the
-`#the_canvas_id` canvas from [index.html](index.html). All logic lives in five modules:
+`#the_canvas_id` canvas from [index.html](index.html). Logic is split across:
 
 | Module | Responsibility |
 |--------|----------------|
-| [src/app.rs](src/app.rs) | Central `App` state + `update()` loop. Owns all state, polls async results each frame, routes drops, runs edge compute. |
-| [src/drawing.rs](src/drawing.rs) | All egui rendering & input: comparison canvas, separator drag, pan/zoom, headers (wide/narrow), loading + drop-zone views. |
-| [src/decode.rs](src/decode.rs) | `decode_via_browser()` — async image decode using the browser's native `createImageBitmap` + offscreen canvas `getImageData`. |
-| [src/edge.rs](src/edge.rs) | `sobel_edge_detect()` — synchronous Sobel filter producing a grayscale `ColorImage`. |
-| [src/types.rs](src/types.rs) | Shared data contracts: `Side`, `LoadedFile`, `DecodedImage`, `DecodeOutcome`, `LoadedImage`. |
+| [src/app.rs](src/app.rs) | `App` shell, `update()` loop, side accessors, `set_edges_enabled` / `clear_all`. |
+| [src/state.rs](src/state.rs) | `ViewState`, `EdgeState`/`EdgeCache`, `AsyncIo`, `DropState`, image id counter. |
+| [src/load.rs](src/load.rs) | Drop routing, file picker, paste listener, channel polling, texture build. |
+| [src/drawing.rs](src/drawing.rs) | egui rendering & input: comparison canvas, headers, loading + drop-zone views. |
+| [src/decode.rs](src/decode.rs) | `decode_via_browser()` — async decode via `createImageBitmap` + canvas `getImageData`. |
+| [src/edge.rs](src/edge.rs) | `sobel_edge_detect()` + cached edge texture upload. |
+| [src/types.rs](src/types.rs) | Shared contracts: `Side`, `LoadedFile`, `DecodedImage`, `DecodeOutcome`, `LoadedImage`. |
+
+Images are stored as `App.images: [Option<LoadedImage>; 2]`, indexed by `Side` (`Left = 0`,
+`Right = 1`). Edge caches use the same layout (`EdgeState.caches`).
 
 ### Data flow (image load)
 
@@ -31,12 +36,12 @@ Single-page app. The entry point [src/main.rs](src/main.rs) boots `eframe::WebRu
 drop / file-picker / paste → LoadedFile (file_tx) → poll_picked_files()
   → load_and_set() → decode_via_browser() [async, off-thread]
   → DecodeOutcome (decoded_tx) → poll_decoded_images()
-  → build_loaded_image() (uploads texture) → set_side() → draw_comparison()
+  → build_loaded_image() (uploads texture) → set_image() → draw_comparison()
 ```
 
 Paste is handled by a one-time document `paste` listener (not egui key
 handling). The first `image/*` clipboard item is auto-routed like a single-file
-drop (first empty side, else right).
+drop (first empty side, else right) via `App::auto_route_side()`.
 
 ## Project-specific conventions
 
@@ -50,7 +55,7 @@ drop (first empty side, else right).
 - **Keep RGBA in memory.** `LoadedImage.rgba` caches decoded pixels so edge detection can rerun
   without re-decoding.
 - **Cheap cache keys.** Each `LoadedImage` gets a monotonic `id: u64` used as the edge-detection
-  cache key (`EdgeState.left_key/right_key`) — compare ids, never hash pixels.
+  cache key (`EdgeCache.key`) — compare ids, never hash pixels.
 - **web-sys features are explicit.** Any new browser API (DOM, canvas, blob) must be added to the
   `web-sys` `features` list in [Cargo.toml](Cargo.toml) or it won't link.
 - **Dev builds optimize dependencies.** [Cargo.toml](Cargo.toml) sets `opt-level = 3` for deps
