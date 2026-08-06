@@ -269,7 +269,14 @@ impl App {
                     return;
                 };
                 let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-                if tx.send(LoadedFile { side, name, bytes }).is_ok() {
+                if tx
+                    .send(LoadedFile {
+                        side: Some(side),
+                        name,
+                        bytes,
+                    })
+                    .is_ok()
+                {
                     // Wake the UI so the picked file is polled and decoded even
                     // when no other input is driving frames (e.g. on mobile).
                     ctx.request_repaint();
@@ -283,11 +290,113 @@ impl App {
         input.click();
     }
 
-    /// Drain any files picked through the async dialog and apply them.
+    /// Install a one-shot document `paste` listener that loads the first image
+    /// from the clipboard through the same channel as the file picker.
+    ///
+    /// Safe to call every frame: registration is guarded by a process-wide
+    /// `Once` so the listener is only attached once.
+    pub fn install_paste_listener(&self, ctx: &egui::Context) {
+        use std::sync::Once;
+        use wasm_bindgen::JsCast;
+        use wasm_bindgen::closure::Closure;
+
+        static PASTE_LISTENER: Once = Once::new();
+        let tx = self.io.file_tx.clone();
+        let ctx = ctx.clone();
+
+        PASTE_LISTENER.call_once(move || {
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+            let Some(document) = window.document() else {
+                return;
+            };
+
+            let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+                let Ok(clipboard_event) = event.dyn_into::<web_sys::ClipboardEvent>() else {
+                    return;
+                };
+                let Some(data) = clipboard_event.clipboard_data() else {
+                    return;
+                };
+                let items = data.items();
+                for i in 0..items.length() {
+                    let Some(item) = items.get(i) else {
+                        continue;
+                    };
+                    let mime = item.type_();
+                    if !mime.starts_with("image/") {
+                        continue;
+                    }
+                    let Ok(Some(file)) = item.get_as_file() else {
+                        continue;
+                    };
+
+                    // Stop the browser from also handling this paste.
+                    clipboard_event.prevent_default();
+
+                    let name = {
+                        let n = file.name();
+                        if n.is_empty() {
+                            // Screenshots and some OS pastes omit a filename.
+                            let ext = mime.rsplit('/').next().unwrap_or("png");
+                            // Normalize common MIME subtypes to file extensions.
+                            let ext = match ext {
+                                "jpeg" => "jpg",
+                                "svg+xml" => "svg",
+                                other => other,
+                            };
+                            format!("clipboard.{ext}")
+                        } else {
+                            n
+                        }
+                    };
+                    let tx = tx.clone();
+                    let ctx = ctx.clone();
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let Ok(buffer) =
+                            wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await
+                        else {
+                            return;
+                        };
+                        let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+                        if tx
+                            .send(LoadedFile {
+                                side: None,
+                                name,
+                                bytes,
+                            })
+                            .is_ok()
+                        {
+                            ctx.request_repaint();
+                        }
+                    });
+                    // Only the first image in the clipboard is used.
+                    break;
+                }
+            });
+
+            let _ = document.add_event_listener_with_callback(
+                "paste",
+                closure.as_ref().unchecked_ref(),
+            );
+            // Keep the closure alive for the lifetime of the page.
+            closure.forget();
+        });
+    }
+
+    /// Drain any files picked through the async dialog (or pasted) and apply them.
     pub fn poll_picked_files(&mut self, ctx: &egui::Context) {
         let pending: Vec<LoadedFile> = self.io.file_rx.try_iter().collect();
         for file in pending {
-            self.load_and_set(ctx, file.side, &file.name, &file.bytes);
+            let side = file.side.unwrap_or_else(|| {
+                if self.left.is_none() {
+                    Side::Left
+                } else {
+                    Side::Right
+                }
+            });
+            self.load_and_set(ctx, side, &file.name, &file.bytes);
         }
     }
 
@@ -320,6 +429,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.install_paste_listener(ctx);
         self.poll_picked_files(ctx);
         self.poll_decoded_images(ctx);
         self.handle_dropped_files(ctx);

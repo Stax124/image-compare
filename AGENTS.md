@@ -28,11 +28,15 @@ Single-page app. The entry point [src/main.rs](src/main.rs) boots `eframe::WebRu
 ### Data flow (image load)
 
 ```
-drop / file-picker → LoadedFile (file_tx) → poll_picked_files()
+drop / file-picker / paste → LoadedFile (file_tx) → poll_picked_files()
   → load_and_set() → decode_via_browser() [async, off-thread]
   → DecodeOutcome (decoded_tx) → poll_decoded_images()
   → build_loaded_image() (uploads texture) → set_side() → draw_comparison()
 ```
+
+Paste is handled by a one-time document `paste` listener (not egui key
+handling). The first `image/*` clipboard item is auto-routed like a single-file
+drop (first empty side, else right).
 
 ## Project-specific conventions
 

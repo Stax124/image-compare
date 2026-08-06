@@ -413,7 +413,7 @@ impl App {
         painter.text(
             rect.center() + Vec2::new(0.0, gap),
             egui::Align2::CENTER_CENTER,
-            "Drag & drop or tap to browse",
+            "Drag & drop, paste, or tap to browse",
             egui::FontId::proportional(hint_size),
             Color32::from_gray(150),
         );

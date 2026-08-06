@@ -9,9 +9,11 @@ pub enum Side {
     Right,
 }
 
-/// A file picked or dropped on the web, delivered as in-memory bytes.
+/// A file picked, dropped, or pasted on the web, delivered as in-memory bytes.
 pub struct LoadedFile {
-    pub side: Side,
+    /// Target side. `None` means auto-route like a single-file drop: first
+    /// empty side, otherwise the right side.
+    pub side: Option<Side>,
     pub name: String,
     pub bytes: Vec<u8>,
 }
