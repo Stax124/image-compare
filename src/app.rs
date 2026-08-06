@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::state::{AsyncIo, DropState, EdgeState, ViewState};
+use crate::state::{AsyncIo, DropState, EdgePolarity, EdgeState, ViewState};
 use crate::types::{LoadedImage, NARROW_BREAKPOINT, Side};
 
 #[derive(Default)]
@@ -45,6 +45,19 @@ impl App {
     pub fn set_edges_enabled(&mut self, ctx: &egui::Context, enabled: bool) {
         self.edges.enabled = enabled;
         if enabled {
+            self.start_edge_compute(ctx);
+        }
+    }
+
+    pub fn set_edge_polarity(&mut self, ctx: &egui::Context, polarity: EdgePolarity) {
+        if self.edges.polarity == polarity {
+            return;
+        }
+        self.edges.polarity = polarity;
+        for side in Side::ALL {
+            self.edges.clear_side(side);
+        }
+        if self.edges.enabled {
             self.start_edge_compute(ctx);
         }
     }

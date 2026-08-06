@@ -2,6 +2,7 @@ use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::app::App;
+use crate::state::EdgePolarity;
 use crate::types::{LoadedImage, NARROW_BREAKPOINT, Side};
 
 /// Format a byte count into a human-readable string (e.g. "1.2 MB").
@@ -248,6 +249,19 @@ impl App {
         let toggle = ui.toggle_value(&mut enabled, edge_label);
         if toggle.changed() {
             self.set_edges_enabled(ctx, enabled);
+        }
+
+        if self.edges.enabled {
+            let mut positive = self.edges.polarity == EdgePolarity::Positive;
+            let polarity_toggle = ui.toggle_value(&mut positive, "Positive");
+            if polarity_toggle.changed() {
+                let polarity = if positive {
+                    EdgePolarity::Positive
+                } else {
+                    EdgePolarity::Negative
+                };
+                self.set_edge_polarity(ctx, polarity);
+            }
         }
 
         if ui.button("Reset").clicked() {

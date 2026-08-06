@@ -62,10 +62,21 @@ impl EdgeCache {
     }
 }
 
+/// Edge display polarity: magnitude as light-on-dark or dark-on-light.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum EdgePolarity {
+    /// White edges on black background (Sobel magnitude as-is).
+    #[default]
+    Negative,
+    /// Black edges on white background (inverted magnitude).
+    Positive,
+}
+
 /// Edge-detection toggle plus per-side cached edge textures.
 #[derive(Default)]
 pub struct EdgeState {
     pub enabled: bool,
+    pub polarity: EdgePolarity,
     pub caches: [EdgeCache; 2],
 }
 
