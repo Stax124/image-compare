@@ -16,6 +16,8 @@ web-sys = { version = "0.3", features = [
     "Document",
     "Window",
     "HtmlCanvasElement",
+    "HtmlElement",
+    "HtmlAnchorElement",
     "HtmlInputElement",
     "ImageBitmap",
     "CanvasRenderingContext2d",
@@ -29,6 +31,8 @@ web-sys = { version = "0.3", features = [
     "DataTransferItem",
     "DataTransferItemList",
     "Event",
+    "Url",
+    "CssStyleDeclaration",
 ] }
 
 # Optimize dependencies (egui, etc.) even in debug/`trunk serve` builds. Without

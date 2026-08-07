@@ -2,6 +2,7 @@ use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::app::App;
+use crate::export::ExportFormat;
 use crate::state::EdgePolarity;
 use crate::types::{LoadedImage, NARROW_BREAKPOINT, Side};
 
@@ -262,6 +263,17 @@ impl App {
                 };
                 self.set_edge_polarity(ctx, polarity);
             }
+        }
+
+        if self.both_loaded() {
+            ui.menu_button("Export", |ui| {
+                for format in ExportFormat::ALL {
+                    if ui.button(format.label()).clicked() {
+                        self.export_comparison(format);
+                        ui.close_menu();
+                    }
+                }
+            });
         }
 
         if ui.button("Reset").clicked() {

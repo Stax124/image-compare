@@ -2,6 +2,7 @@ mod app;
 mod decode;
 mod drawing;
 mod edge;
+mod export;
 mod load;
 mod state;
 mod types;
