@@ -34,6 +34,7 @@ web-sys = { version = "0.3", features = [
     "Url",
     "CssStyleDeclaration",
 ] }
+jxl = { version = "0.8", default-features = false, features = ["simd128"] }
 
 # Optimize dependencies (egui, etc.) even in debug/`trunk serve` builds. Without
 # this, per-pixel loops such as `ColorImage::from_rgba_unmultiplied` run

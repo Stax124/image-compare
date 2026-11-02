@@ -142,7 +142,7 @@ impl App {
         };
         input.set_type("file");
         input.set_accept(
-            "image/png,image/jpeg,image/webp,image/bmp,image/tiff,image/avif,.png,.jpg,.jpeg,.webp,.bmp,.tiff,.avif",
+            "image/png,image/jpeg,image/webp,image/bmp,image/tiff,image/avif,image/jxl,.png,.jpg,.jpeg,.webp,.bmp,.tiff,.avif,.jxl",
         );
 
         let input_clone = input.clone();

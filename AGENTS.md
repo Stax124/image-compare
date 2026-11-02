@@ -23,7 +23,7 @@ Single-page app. The entry point [src/main.rs](src/main.rs) boots `eframe::WebRu
 | [src/state.rs](src/state.rs) | `ViewState`, `EdgeState`/`EdgeCache`, `AsyncIo`, `DropState`, image id counter. |
 | [src/load.rs](src/load.rs) | Drop routing, file picker, paste listener, channel polling, texture build. |
 | [src/drawing.rs](src/drawing.rs) | egui rendering & input: comparison canvas, headers, loading + drop-zone views. |
-| [src/decode.rs](src/decode.rs) | `decode_via_browser()` — async decode via `createImageBitmap` + canvas `getImageData`. |
+| [src/decode.rs](src/decode.rs) | `decode_via_browser()` — async decode via `createImageBitmap` + canvas `getImageData`, with a jxl-rs fallback for JPEG XL. |
 | [src/edge.rs](src/edge.rs) | `sobel_edge_detect()` + cached edge texture upload. |
 | [src/types.rs](src/types.rs) | Shared contracts: `Side`, `LoadedFile`, `DecodedImage`, `DecodeOutcome`, `LoadedImage`. |
 
@@ -51,7 +51,10 @@ drop (first empty side, else right) via `App::auto_route_side()`.
   so the UI wakes up.
 - **Decode in the browser, not in Rust.** Image formats (PNG/JPEG/WebP/AVIF/BMP/TIFF) are
   decoded via `createImageBitmap` because the browser's decoder is 10–50× faster than a WASM
-  one. Don't add a Rust image-decoding crate.
+  one. Don't add a Rust image-decoding crate. The one exception is `jxl` (jxl-rs), used only
+  when the browser can't decode a file; it runs synchronously and has no color management.
+- **SIMD is on.** [.cargo/config.toml](.cargo/config.toml) enables `+simd128` for the wasm
+  target; browsers without wasm SIMD can't load the app at all.
 - **Keep RGBA in memory.** `LoadedImage.rgba` caches decoded pixels so edge detection can rerun
   without re-decoding.
 - **Cheap cache keys.** Each `LoadedImage` gets a monotonic `id: u64` used as the edge-detection

@@ -1,2 +1,6 @@
 [build]
 target = "wasm32-unknown-unknown"
+
+# Lets jxl-rs (and LLVM auto-vectorisation) use wasm SIMD; supported by all current browsers.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
